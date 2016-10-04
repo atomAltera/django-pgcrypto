@@ -17,21 +17,38 @@ class BaseEncryptedField (models.Field):
     field_cast = ''
 
     def __init__(self, *args, **kwargs):
+        deffered_key_calculation = False
+
         # Just in case pgcrypto and/or pycrypto support more than AES/Blowfish.
         valid_ciphers = getattr(settings, 'PGCRYPTO_VALID_CIPHERS', ('AES', 'Blowfish'))
         self.cipher_name = kwargs.pop('cipher', getattr(settings, 'PGCRYPTO_DEFAULT_CIPHER', 'AES'))
         assert self.cipher_name in valid_ciphers
         self.cipher_key = kwargs.pop('key', getattr(settings, 'PGCRYPTO_DEFAULT_KEY', ''))
         self.charset = kwargs.pop('charset', 'utf-8')
-        if self.cipher_name == 'AES':
-            if isinstance(self.cipher_key, six.text_type):
-                self.cipher_key = self.cipher_key.encode(self.charset)
-            self.cipher_key = aes_pad_key(self.cipher_key)
+
+
         mod = __import__('Crypto.Cipher', globals(), locals(), [self.cipher_name], 0)
         self.cipher_class = getattr(mod, self.cipher_name)
         self.check_armor = kwargs.pop('check_armor', True)
         self.versioned = kwargs.pop('versioned', False)
         super(BaseEncryptedField, self).__init__(*args, **kwargs)
+
+    def cipher_key_is_defered(self):
+        return callable(self.cipher_key)
+
+    def get_cipher_key(self):
+        if self.cipher_key_is_defered():
+            cipher_key = self.cipher_key()
+        else:
+            cipher_key = self.cipher_key
+
+        if self.cipher_name == 'AES':
+            if isinstance(cipher_key, six.text_type):
+                cipher_key = cipher_key.encode(self.charset)
+            cipher_key = aes_pad_key(cipher_key)
+
+        return cipher_key
+
 
     def get_internal_type(self):
         return 'TextField'
@@ -64,7 +81,7 @@ class BaseEncryptedField (models.Field):
         pgcrypto expects a zeroed block for IV (initial value), but the IV on the cipher
         object is cumulatively updated each time encrypt/decrypt is called.
         """
-        return self.cipher_class.new(self.cipher_key, self.cipher_class.MODE_CBC, b'\0' * self.cipher_class.block_size)
+        return self.cipher_class.new(self.get_cipher_key(), self.cipher_class.MODE_CBC, b'\0' * self.cipher_class.block_size)
 
     def is_encrypted(self, value):
         """
