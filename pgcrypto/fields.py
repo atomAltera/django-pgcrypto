@@ -1,3 +1,7 @@
+import datetime
+import decimal
+
+import django
 from django import forms
 from django.conf import settings
 from django.core import validators
@@ -5,15 +9,11 @@ from django.db import models
 from django.utils import six, timezone
 from django.utils.encoding import force_text
 from django.utils.translation import ugettext_lazy as _
-import django
 
 from .base import aes_pad_key, armor, dearmor, pad, unpad
 
-import datetime
-import decimal
 
-
-class BaseEncryptedField (models.Field):
+class BaseEncryptedField(models.Field):
     field_cast = ''
 
     def __init__(self, *args, **kwargs):
@@ -23,15 +23,25 @@ class BaseEncryptedField (models.Field):
         assert self.cipher_name in valid_ciphers
         self.cipher_key = kwargs.pop('key', getattr(settings, 'PGCRYPTO_DEFAULT_KEY', ''))
         self.charset = kwargs.pop('charset', 'utf-8')
-        if self.cipher_name == 'AES':
-            if isinstance(self.cipher_key, six.text_type):
-                self.cipher_key = self.cipher_key.encode(self.charset)
-            self.cipher_key = aes_pad_key(self.cipher_key)
+
         mod = __import__('Crypto.Cipher', globals(), locals(), [self.cipher_name], 0)
         self.cipher_class = getattr(mod, self.cipher_name)
         self.check_armor = kwargs.pop('check_armor', True)
         self.versioned = kwargs.pop('versioned', False)
         super(BaseEncryptedField, self).__init__(*args, **kwargs)
+
+    def get_cipher_key(self):
+        if callable(self.cipher_key):
+            cipher_key = self.cipher_key(self)
+        else:
+            cipher_key = self.cipher_key
+
+        if self.cipher_name == 'AES':
+            if isinstance(cipher_key, six.text_type):
+                cipher_key = cipher_key.encode(self.charset)
+            cipher_key = aes_pad_key(cipher_key)
+
+        return cipher_key
 
     def get_internal_type(self):
         return 'TextField'
@@ -50,7 +60,7 @@ class BaseEncryptedField (models.Field):
         """
         name, path, args, kwargs = super(BaseEncryptedField, self).deconstruct()
         kwargs.update({
-            #'key': self.cipher_key,
+            # 'key': self.cipher_key,
             'cipher': self.cipher_name,
             'charset': self.charset,
             'check_armor': self.check_armor,
@@ -64,7 +74,8 @@ class BaseEncryptedField (models.Field):
         pgcrypto expects a zeroed block for IV (initial value), but the IV on the cipher
         object is cumulatively updated each time encrypt/decrypt is called.
         """
-        return self.cipher_class.new(self.cipher_key, self.cipher_class.MODE_CBC, b'\0' * self.cipher_class.block_size)
+        return self.cipher_class.new(self.get_cipher_key(), self.cipher_class.MODE_CBC,
+                                     b'\0' * self.cipher_class.block_size)
 
     def is_encrypted(self, value):
         """
@@ -99,7 +110,7 @@ class BaseEncryptedField (models.Field):
         return value
 
 
-class EncryptedTextField (BaseEncryptedField):
+class EncryptedTextField(BaseEncryptedField):
     description = _('Text')
 
     def formfield(self, **kwargs):
@@ -108,7 +119,7 @@ class EncryptedTextField (BaseEncryptedField):
         return super(EncryptedTextField, self).formfield(**defaults)
 
 
-class EncryptedCharField (BaseEncryptedField):
+class EncryptedCharField(BaseEncryptedField):
     description = _('String')
 
     def __init__(self, *args, **kwargs):
@@ -124,7 +135,7 @@ class EncryptedCharField (BaseEncryptedField):
         return super(EncryptedCharField, self).formfield(**defaults)
 
 
-class EncryptedIntegerField (BaseEncryptedField):
+class EncryptedIntegerField(BaseEncryptedField):
     description = _('Integer')
     field_cast = '::integer'
 
@@ -139,7 +150,7 @@ class EncryptedIntegerField (BaseEncryptedField):
         return value
 
 
-class EncryptedDecimalField (BaseEncryptedField):
+class EncryptedDecimalField(BaseEncryptedField):
     description = _('Decimal number')
     field_cast = '::numeric'
 
@@ -154,7 +165,7 @@ class EncryptedDecimalField (BaseEncryptedField):
         return value
 
 
-class EncryptedDateField (BaseEncryptedField):
+class EncryptedDateField(BaseEncryptedField):
     description = _('Date (without time)')
     field_cast = '::date'
 
@@ -195,7 +206,7 @@ class EncryptedDateField (BaseEncryptedField):
         return datetime.date.today()
 
 
-class EncryptedDateTimeField (EncryptedDateField):
+class EncryptedDateTimeField(EncryptedDateField):
     description = _('Date (with time)')
     field_cast = 'timestamp with time zone'
 
@@ -211,7 +222,7 @@ class EncryptedDateTimeField (EncryptedDateField):
         return timezone.now()
 
 
-class EncryptedEmailField (BaseEncryptedField):
+class EncryptedEmailField(BaseEncryptedField):
     default_validators = [validators.validate_email]
     description = _('Email address')
 
@@ -225,7 +236,8 @@ if django.VERSION >= (1, 7):
 
     from django.db.models.lookups import Lookup
 
-    class EncryptedLookup (Lookup):
+
+    class EncryptedLookup(Lookup):
 
         def as_postgresql(self, qn, connection):
             lhs, lhs_params = self.process_lhs(qn, connection)
@@ -237,7 +249,8 @@ if django.VERSION >= (1, 7):
                 'Blowfish': 'bf',
             }[self.lhs.output_field.cipher_name]
             return "convert_from(decrypt(dearmor(%s), %%s, '%s'), 'utf-8')%s %s" % \
-                (lhs, cipher, self.lhs.output_field.field_cast, rhs), params
+                   (lhs, cipher, self.lhs.output_field.field_cast, rhs), params
+
 
     for lookup_name in ('exact', 'gt', 'gte', 'lt', 'lte'):
         class_name = 'EncryptedLookup_%s' % lookup_name
